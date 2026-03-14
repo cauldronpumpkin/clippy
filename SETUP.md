@@ -1,214 +1,172 @@
-# Clippy Setup
+# Clippy Engineering Setup
 
-This repository is not a finished desktop app yet.
+`README.md` is the quick-start guide for running Clippy on macOS and Windows.
+This file is the engineering note for the repo's current state, development
+requirements, and the remaining implementation work.
 
-Right now it contains reusable Go packages:
+## Current State
 
-- `internal/clipwire`: clipboard payload and chunking types
-- `internal/netmesh`: local-network discovery and WebSocket transport
-- `internal/osclip`: native clipboard read/write/watch integration
+This repository is no longer just a collection of reusable packages. It now
+contains a runnable CLI and daemon entrypoint at `cmd/clippy/main.go` that
+wires together:
 
-There is currently no `cmd/` folder, no `main.go`, and no packaged binary to double-click. So "setting up the app" currently means setting up the development environment so you can build, test, and integrate the modules.
+- `internal/osclip` for native clipboard watch/apply
+- `internal/netmesh` for local network discovery and WebSocket transport
+- `internal/clipwire` for payload serialization and chunking
+- `internal/app` for runtime orchestration, detached launch, and local control
 
-## What Clippy Can Do Today
+Today Clippy can:
 
-- Watch the local clipboard for text, URLs, and images
-- Write incoming clipboard payloads into the local clipboard
-- Discover peers on the local network and exchange binary frames
+- watch the local clipboard for text, URLs, and images
+- write inbound clipboard payloads into the local clipboard
+- discover peers on the local network and exchange clipboard frames
+- expose local daemon control commands through `start`, `status`, `stop`, and
+  the internal `daemon` subcommand
 
-What is still missing:
+Clippy is runnable from source today, but it is not yet a polished consumer app.
 
-- A runnable top-level app or CLI that wires these packages together
-- Installer or packaged `.app` / `.exe`
-- End-user settings, logging, and startup integration
+## What Is Still Left To Implement
 
-## Fastest Path
+The main product gaps are now above the transport/runtime layer:
 
-If you just want to confirm your machine is ready:
+- packaged macOS `.app` distribution
+- packaged Windows installer or release-distributed `.exe` flow
+- a user-friendly install path for non-developers
+- persistent settings/config UX beyond flags and environment variables
+- startup/login integration and background service management
+- polished logging, diagnostics, and supportability guidance for end users
+- documentation and test hardening for macOS environments polluted by external
+  `CGO_LDFLAGS` or unrelated dynamic library settings
 
-1. Install Go from [go.dev/dl](https://go.dev/dl).
-2. Open this repo in a terminal.
-3. Run:
+What is not present in this repo today:
 
-```bash
-go mod download
-go test ./...
-```
+- GUI
+- tray/menu bar app
+- installer
+- auto-start at login
+- release packaging pipeline
 
-If that passes, your machine is ready for Clippy development.
+## Developer Setup
 
-## macOS Setup
+### Requirements
 
-## Requirements
+- Go 1.25.x
+- macOS 12+ or Windows 10+
+- local network where mDNS peer discovery is allowed
 
-- macOS 12 or later is the current baseline on the official Go downloads page.
-- Go installed from [go.dev/dl](https://go.dev/dl)
+Additional macOS requirement:
+
 - Xcode Command Line Tools
-- `CGO_ENABLED=1`
 
-Why CGO matters:
+Why macOS is special:
 
-- This repo uses [`golang.design/x/clipboard`](https://github.com/golang-design/clipboard).
-- That library requires CGO on macOS and uses Cocoa for clipboard access.
+- `golang.design/x/clipboard` uses Cocoa on macOS
+- CGO must be enabled for clipboard integration
 
-## Step 1: Install Go
+### Verify The Environment
 
-Install the macOS package from the official Go site:
-
-- [Download and install Go](https://go.dev/doc/install)
-- [Downloads page](https://go.dev/dl)
-
-After installation, open a new Terminal window and verify:
+macOS:
 
 ```bash
 go version
-```
-
-## Step 2: Install Xcode Command Line Tools
-
-Run:
-
-```bash
-xcode-select --install
-```
-
-Then verify:
-
-```bash
 xcode-select -p
+go env CGO_ENABLED
+```
+
+Windows PowerShell:
+
+```powershell
+go version
 go env CGO_ENABLED
 ```
 
 Expected:
 
-- `xcode-select -p` prints a valid developer tools path
-- `go env CGO_ENABLED` prints `1`
+- `go version` reports Go 1.25.x or newer compatible toolchain
+- macOS `xcode-select -p` prints a valid developer tools path
+- `go env CGO_ENABLED` prints `1` on macOS
 
-## Step 3: Open the Repo
+## Build And Run From Source
+
+macOS:
 
 ```bash
-cd /path/to/clippy
-go mod download
+go build -o clippy ./cmd/clippy
+./clippy start --foreground
 ```
 
-## Step 4: Run the Test Suite
+Windows PowerShell:
 
-```bash
-go test ./...
+```powershell
+go build -o clippy.exe ./cmd/clippy
+.\clippy.exe start --foreground
 ```
 
-If you have custom linker flags in your shell environment, they can break CGO test binaries. A known example is `CGO_LDFLAGS`.
+In another terminal:
 
-If `go test ./...` fails with a missing unrelated `.dylib`, retry with:
+macOS:
 
 ```bash
+./clippy status
+./clippy stop
+```
+
+Windows PowerShell:
+
+```powershell
+.\clippy.exe status
+.\clippy.exe stop
+```
+
+Notes:
+
+- `start` runs detached by default; `--foreground` is the easiest way to
+  validate a new setup
+- `daemon` exists for the detached launcher path and is not the primary
+  end-user command
+- the default control endpoint is `<os.TempDir()>/clippy.sock` on Unix-like
+  systems
+- the default control endpoint is `\\.\pipe\clippy-<USERNAME>` on Windows
+
+## Test Status And Known Caveat
+
+The lightweight package tests pass, but this macOS environment exposes a real
+linker/runtime caveat for clipboard-backed binaries and tests:
+
+- `go build ./cmd/clippy` succeeds here, but prints linker warnings about
+  duplicate `-lobjectbox`
+- the resulting `clippy` binary also aborts at startup in that polluted
+  environment because it tries to load `@rpath/libobjectbox.dylib`
+- `go test ./...` fails in `internal/app` and `internal/osclip` because the
+  produced test binaries try to load `@rpath/libobjectbox.dylib`
+
+This is not a Clippy dependency declared by the repo. It is coming from the
+local shell or linker environment.
+
+If you hit similar failures on macOS, inspect and temporarily clear custom CGO
+linker flags before rebuilding or rerunning tests:
+
+```bash
+echo "${CGO_LDFLAGS:-}"
 unset CGO_LDFLAGS
+go build -o clippy ./cmd/clippy
 go test ./...
 ```
 
-## Step 5: Confirm Clipboard Access Works
+If the environment still injects unrelated libraries, also inspect other
+toolchain variables such as `CGO_CPPFLAGS`, `CGO_CFLAGS`, and `LDFLAGS`.
 
-The clipboard package supports:
+In this environment, rebuilding after unsetting `CGO_LDFLAGS` was sufficient to
+produce a working CLI binary that passed the `status`, `start --foreground`,
+and `stop` smoke checks.
 
-- UTF-8 text
-- PNG images
+## Recommended Next Engineering Work
 
-A quick manual check for image clipboard behavior on macOS:
+If the goal is to turn Clippy into a consumer-ready app, the next implementation
+work should focus on packaging and operations instead of the clipboard/mesh
+core:
 
-- Press `Ctrl+Shift+Cmd+4` to copy a screenshot to the clipboard
-
-## Windows Setup
-
-## Requirements
-
-- Windows 10 or later
-- Go installed from [go.dev/dl](https://go.dev/dl)
-
-Why Windows is simpler:
-
-- [`golang.design/x/clipboard`](https://github.com/golang-design/clipboard) does not require CGO on Windows
-- No extra clipboard dependency is required
-
-## Step 1: Install Go
-
-Install the Windows MSI from:
-
-- [Download and install Go](https://go.dev/doc/install)
-- [Go on Windows](https://go.dev/wiki/Windows)
-
-After installation, close and reopen PowerShell or Command Prompt, then verify:
-
-```powershell
-go version
-```
-
-## Step 2: Open the Repo
-
-In PowerShell:
-
-```powershell
-cd C:\path\to\clippy
-go mod download
-```
-
-## Step 3: Run the Test Suite
-
-```powershell
-go test ./...
-```
-
-## Step 4: Confirm Clipboard Access Works
-
-The clipboard package supports:
-
-- UTF-8 text
-- PNG images
-
-A quick manual check for image clipboard behavior on Windows:
-
-- Press `Shift+Win+S` to copy a screenshot to the clipboard
-
-## Current Limits You Should Know
-
-- The repo does not yet contain a runnable `main` package.
-- There is no packaged macOS app bundle.
-- There is no packaged Windows `.exe` or installer.
-- The clipboard layer always reads native images as PNG.
-- Incoming JPEG clipboard payloads are normalized to PNG before writing locally.
-
-## How To "Use" The Repo Right Now
-
-Today, you use Clippy as a developer library, not as a consumer app.
-
-Typical workflow:
-
-1. Set up Go.
-2. Run `go test ./...`.
-3. Add a `cmd/clippy` entrypoint that wires together:
-   - `internal/osclip.Manager`
-   - `internal/netmesh.Manager`
-   - `internal/clipwire` payload serialization
-
-At a high level, the future app flow looks like this:
-
-1. Start `osclip.Manager`
-2. Listen on `osclip.Events()`
-3. Convert events into network frames using `clipwire`
-4. Broadcast frames with `netmesh`
-5. On inbound network payloads, call `osclip.ApplyRemote(...)`
-
-## Recommended Next Step
-
-If your goal is a usable app rather than just a working dev environment, the next missing piece is a `cmd/clippy/main.go` that:
-
-- starts the clipboard manager
-- starts the network manager
-- converts clipboard events into frames
-- applies inbound frames back into the local clipboard
-
-## Sources
-
-- [Go install docs](https://go.dev/doc/install)
-- [Go downloads](https://go.dev/dl)
-- [Go on Windows](https://go.dev/wiki/Windows)
-- [golang.design/x/clipboard](https://github.com/golang-design/clipboard)
+1. Add a releaseable build/distribution path for macOS and Windows.
+2. Define persistent config storage and a user-facing settings surface.
+3. Add startup-at-login or service integration on both platforms.
+4. Improve operational logging and troubleshooting documentation.
